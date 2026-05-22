@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "pinned-tool": {
+      "command": "npx",
+      "args": [
+        "somepkg@1.2.3"
+      ]
+    },
+    "scoped-filesystem": {
+      "command": "npx",
+      "args": [
+        "@modelcontextprotocol/server-filesystem@1.0.0",
+        "/Users/example/project/data"
+      ]
+    }
+  }
+}
