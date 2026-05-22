@@ -265,6 +265,17 @@ by `rule_id`):
 mcpsec rules --json
 ```
 
+`--sarif` emits a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) document
+(`version: "2.1.0"`) describing the catalogue. Every rule is listed under
+`runs[0].tool.driver.rules` with its `shortDescription` and a
+`defaultConfiguration.level` (its default severity mapped to a SARIF level:
+`HIGH → error`, `MEDIUM → warning`, `LOW`/`INFO → note`). Because `rules` scans
+nothing, `runs[0].results` is an empty list. Mutually exclusive with `--json`.
+
+```sh
+mcpsec rules --sarif
+```
+
 The catalogue is derived from the same rule metadata and docstrings the engine
 uses, so it always stays in step with the rules below.
 

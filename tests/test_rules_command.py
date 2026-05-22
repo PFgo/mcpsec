@@ -6,6 +6,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 from mcpsec import __version__, cli
+from mcpsec.cli import _SARIF_SCHEMA
 from mcpsec.rules import RULE_METADATA
 
 # Expected (rule_id, default severity) pairs, sourced from the single
@@ -16,6 +17,16 @@ _EXPECTED_SEVERITIES = {rule_id: severity for rule_id, severity in _EXPECTED}
 # Derive the rule count from the catalogue so adding a rule never requires
 # touching the assertions below.
 _EXPECTED_COUNT = len(_EXPECTED)
+
+# Documented severity -> SARIF level contract (HIGH->error, MEDIUM->warning,
+# LOW/INFO->note). Used to derive the expected level for each rule's default
+# severity rather than re-listing per-rule levels.
+_SEVERITY_TO_LEVEL = {
+    "HIGH": "error",
+    "MEDIUM": "warning",
+    "LOW": "note",
+    "INFO": "note",
+}
 
 
 def _run(argv):
@@ -86,6 +97,51 @@ class RulesJsonTest(unittest.TestCase):
         rule_ids = [entry["rule_id"] for entry in rules]
         self.assertEqual(rule_ids, sorted(rule_ids))
         self.assertEqual(rule_ids, _EXPECTED_IDS)
+
+
+class RulesSarifTest(unittest.TestCase):
+    """``rules --sarif`` emits a SARIF 2.1.0 catalogue with no results."""
+
+    def test_sarif_shape(self):
+        code, stdout, stderr = _run(["rules", "--sarif"])
+        self.assertEqual(code, 0, stderr)
+        report = json.loads(stdout)
+        self.assertEqual(report["version"], "2.1.0")
+        self.assertEqual(report["$schema"], _SARIF_SCHEMA)
+        driver = report["runs"][0]["tool"]["driver"]
+        self.assertEqual(driver["name"], "mcpsec")
+        self.assertEqual(driver["version"], __version__)
+        # 'rules' scans nothing, so there are no results.
+        self.assertEqual(report["runs"][0]["results"], [])
+
+    def test_driver_lists_all_rules_sorted_by_id(self):
+        _code, stdout, _err = _run(["rules", "--sarif"])
+        driver_rules = json.loads(stdout)["runs"][0]["tool"]["driver"]["rules"]
+        self.assertEqual(len(driver_rules), _EXPECTED_COUNT)
+        rule_ids = [rule["id"] for rule in driver_rules]
+        self.assertEqual(rule_ids, sorted(rule_ids))
+        self.assertEqual(rule_ids, _EXPECTED_IDS)
+
+    def test_each_rule_has_description_and_mapped_level(self):
+        _code, stdout, _err = _run(["rules", "--sarif"])
+        driver_rules = json.loads(stdout)["runs"][0]["tool"]["driver"]["rules"]
+        for rule in driver_rules:
+            self.assertTrue(rule["shortDescription"]["text"])
+            expected_level = _SEVERITY_TO_LEVEL[_EXPECTED_SEVERITIES[rule["id"]]]
+            self.assertIn(expected_level, ("error", "warning", "note"))
+            self.assertEqual(rule["defaultConfiguration"]["level"], expected_level)
+
+
+class RulesMutualExclusionTest(unittest.TestCase):
+    """``rules --json --sarif`` together is an error (exit 2)."""
+
+    def test_json_and_sarif_returns_2(self):
+        code, _stdout, stderr = _run(["rules", "--json", "--sarif"])
+        self.assertEqual(code, 2)
+        self.assertIn("mutually exclusive", stderr)
+        self.assertEqual(
+            stderr.strip(), "error: --json and --sarif are mutually exclusive"
+        )
 
 
 if __name__ == "__main__":
