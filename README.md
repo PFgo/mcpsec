@@ -5,6 +5,11 @@ It inventories the MCP servers declared in your config files and flags risky
 patterns — hardcoded secrets, shell wrappers, world-readable filesystem mounts,
 plaintext transports, and more — as human-readable, JSON, or SARIF output.
 
+> **Customer alpha:** `mcpsec` is early alpha software. Its rules are static
+> heuristics intended to catch obvious risky MCP configuration patterns and to
+> support human review. Expect false positives and false negatives; do not treat
+> it as the only security control or as a compliance/audit guarantee.
+
 `mcpsec` is **pure Python standard library**: it has no third-party runtime
 dependencies. PyYAML is used opportunistically (best-effort) for `.yaml`/`.yml`
 configs *only if it is already installed*; otherwise YAML files are skipped with
@@ -13,6 +18,18 @@ a warning and JSON configs are unaffected.
 ## Install / run
 
 You can run `mcpsec` two ways.
+
+For customer-alpha pilots, install the pinned alpha tag directly from GitHub:
+
+```sh
+python3 -m pip install "git+https://github.com/PFgo/mcpsec.git@v0.1.0-alpha"
+mcpsec scan path/to/mcp.json
+mcpsec check path/to/mcp.json
+mcpsec scan path/to/mcp.json --sarif > mcpsec.sarif
+```
+
+Use `scan` for a human-readable inventory, `check` for CI/pre-commit gating, and
+`--sarif` when you want to upload findings to a code-scanning dashboard.
 
 Straight from a checkout, with no install:
 
