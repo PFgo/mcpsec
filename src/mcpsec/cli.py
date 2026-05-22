@@ -13,6 +13,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import sys
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import List, Optional, Tuple
@@ -87,6 +88,10 @@ _SECRET_FLAG_FRAGMENTS = (
     "apikey",
     "key",
     "auth",
+)
+
+_POLICY_SECRET_TOKEN = re.compile(
+    r"(?i)(?:[A-Za-z0-9._=-]*(?:secret|token|password|api[_-]?key|apikey)[A-Za-z0-9._=-]{4,}|[A-Za-z0-9._=-]{8,}(?:secret|token|password)[A-Za-z0-9._=-]*)"
 )
 
 
@@ -413,7 +418,81 @@ _POLICY_VERSION = 1
 _POLICY_FAIL_ON = "HIGH"
 
 
-def cmd_policy(args: argparse.Namespace) -> int:
+def _policy_decision_from_review(recommendation: str) -> str:
+    """Map review's human approval recommendation to policy language."""
+    if recommendation == "APPROVE":
+        return "allow"
+    if recommendation == "DENY":
+        return "deny"
+    return "review"
+
+
+def _policy_entry_from_review_server(server: dict) -> dict:
+    """Convert one review server entry into one suggested policy entry.
+
+    ``review`` already groups findings by the concrete server identity and uses
+    redacted messages. ``policy suggest`` deliberately reuses that output so the
+    generated policy cannot leak command-line secret values, env values, header
+    values, or URL credentials.
+    """
+    decision = _policy_decision_from_review(server["recommendation"])
+    permissions = list(server.get("permissions", []))
+    reasons = [_redact_policy_text(finding["message"]) for finding in server.get("findings", [])]
+    notes = ["source: {0}".format(server["source_file"])]
+    if server.get("transport"):
+        notes.append("transport: {0}".format(_redact_policy_text(server["transport"])))
+    if server.get("env_keys"):
+        notes.append("env keys: {0}".format(", ".join(server["env_keys"])))
+    if server.get("header_keys"):
+        notes.append("header keys: {0}".format(", ".join(server["header_keys"])))
+    return {
+        "name": server["name"],
+        "source_file": server["source_file"],
+        "decision": decision,
+        "risk": server["risk"],
+        "reasons": reasons,
+        "allowed_permissions": permissions if decision == "allow" else [],
+        "denied_permissions": permissions if decision == "deny" else [],
+        "notes": notes,
+    }
+
+
+def _build_suggested_policy(
+    results: List[Tuple[str, List[ServerDef]]], findings: List[Finding]
+) -> dict:
+    """Build a conservative starter policy from scan/review results."""
+    review = _build_review(results, findings)
+    servers = {}
+    seen = {}
+    for server in review["servers"]:
+        name = server["name"]
+        if name in servers:
+            original_name = name
+            while name in servers:
+                seen[original_name] = seen.get(original_name, 1) + 1
+                name = "{0}#{1}".format(original_name, seen[original_name])
+        else:
+            seen[name] = 1
+        servers[name] = _policy_entry_from_review_server(server)
+    return {
+        "version": _POLICY_VERSION,
+        "generated_by": "mcpsec policy suggest",
+        "source": {"paths": [config_path for config_path, _servers in results]},
+        "defaults": {
+            "unknown_servers": "review",
+            "dangerous_findings": "deny",
+            "high_risk_findings": "deny",
+        },
+        "fail_on": _POLICY_FAIL_ON,
+        "rules": {
+            rule_id: {"enabled": True, "severity": severity}
+            for rule_id, severity in RULE_METADATA
+        },
+        "servers": servers,
+    }
+
+
+def _cmd_policy_init(args: argparse.Namespace) -> int:
     """Write a policy template (``policy init``).
 
     The template lists every rule (id and default severity, sourced from
@@ -427,7 +506,11 @@ def cmd_policy(args: argparse.Namespace) -> int:
         )
         return 2
 
-    path = args.output
+    if getattr(args, "path", None):
+        print("error: policy init does not accept a path argument", file=sys.stderr)
+        return 2
+
+    path = args.output or os.path.join(".", "mcpsec.policy.json")
     if os.path.exists(path) and not args.force:
         print(
             "error: {0} exists (use --force to overwrite)".format(path),
@@ -450,6 +533,56 @@ def cmd_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_policy_suggest(args: argparse.Namespace) -> int:
+    """Generate a conservative starter policy from MCP config findings."""
+    if args.format != "json":
+        print("error: policy suggest only supports --format json", file=sys.stderr)
+        return 2
+    if args.path:
+        if not os.path.exists(args.path):
+            print("error: no such path: {0}".format(args.path), file=sys.stderr)
+            return 1
+        files = _collect_target_files(args.path)
+    else:
+        from mcpsec.discovery import discover_existing
+
+        files = discover_existing()
+
+    results, _skipped = _gather(files)
+    servers = [server for _config_path, group in results for server in group]
+    findings = run_rules(servers)
+    policy = _build_suggested_policy(results, findings)
+    rendered = json.dumps(policy, indent=2)
+
+    if args.output:
+        if os.path.exists(args.output) and not args.force:
+            print(
+                "error: {0} exists (use --force to overwrite)".format(args.output),
+                file=sys.stderr,
+            )
+            return 1
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+            handle.write("\n")
+        print("wrote {0}".format(args.output))
+    else:
+        print(rendered)
+    return 0
+
+
+def cmd_policy(args: argparse.Namespace) -> int:
+    """Dispatch policy subcommands."""
+    if args.action == "init":
+        return _cmd_policy_init(args)
+    if args.action == "suggest":
+        return _cmd_policy_suggest(args)
+    print(
+        "error: unknown policy action: {0}".format(args.action),
+        file=sys.stderr,
+    )
+    return 2
+
+
 # Threshold ranking for ``check``. Reuses the engine's SEVERITY_ORDER (single
 # source of truth) and extends it with CRITICAL above HIGH so a policy override
 # or ``fail_on: CRITICAL`` works even though the engine emits only HIGH..INFO.
@@ -464,13 +597,14 @@ class _PolicyError(Exception):
     """Raised when a ``--policy`` file is missing, unparseable, or invalid."""
 
 
-def _load_policy(path: str) -> Tuple[str, dict]:
-    """Load a policy file, returning ``(fail_on, rules)``.
+def _load_policy(path: str) -> Tuple[str, dict, dict]:
+    """Load a policy file, returning ``(fail_on, rules, servers)``.
 
     ``fail_on`` is normalised to upper case and validated against the known
-    severities; ``rules`` is the (possibly empty) ruleId -> config mapping.
-    Raises :class:`_PolicyError` on a missing file, malformed JSON, a non-object
-    document, or an unknown ``fail_on`` severity.
+    severities; ``rules`` is the (possibly empty) ruleId -> config mapping;
+    ``servers`` is an optional server-name -> decision mapping produced by
+    ``policy suggest``. Raises :class:`_PolicyError` on a missing file, malformed
+    JSON, a non-object document, or invalid policy values.
     """
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -504,7 +638,20 @@ def _load_policy(path: str) -> Tuple[str, dict]:
                         rule_id, rule_cfg["severity"]
                     )
                 )
-    return fail_on, rules
+    servers = data.get("servers", {})
+    if not isinstance(servers, dict):
+        raise _PolicyError("policy 'servers' must be an object")
+    for server_name, server_cfg in servers.items():
+        if not isinstance(server_cfg, dict):
+            raise _PolicyError("policy server {0} must be an object".format(server_name))
+        decision = str(server_cfg.get("decision", "review")).lower()
+        if decision not in {"allow", "review", "deny"}:
+            raise _PolicyError(
+                "policy server {0} has unknown decision: {1}".format(
+                    server_name, server_cfg.get("decision")
+                )
+            )
+    return fail_on, rules, servers
 
 
 def _effective_severity(finding: Finding, policy_rules: dict) -> str:
@@ -550,21 +697,76 @@ def _redact_message(text: str) -> str:
     return " ".join(parts)
 
 
-def _evaluate_findings(findings: List[Finding], threshold: str, policy_rules: dict):
+def _redact_policy_text(text: str) -> str:
+    """Redact secret-like tokens before writing advisory policy text.
+
+    Policy output can include transport summaries and rule messages. Those are
+    already redacted for known provider-token patterns, but policy files are
+    longer-lived than terminal output, so also mask literal tokens whose text
+    carries secret/token/password/api-key markers.
+    """
+    redacted = []
+    for token in _redact_message(text).split():
+        prefix = token[: len(token) - len(token.lstrip("'\"`([{"))]
+        suffix = token[len(token.rstrip("'\"`.,;:)]}")) :]
+        core = token[len(prefix) : len(token) - len(suffix) if suffix else len(token)]
+        if core and _POLICY_SECRET_TOKEN.fullmatch(core):
+            redacted.append("{0}{1}{2}".format(prefix, _REDACTED, suffix))
+        else:
+            redacted.append(token)
+    return " ".join(redacted)
+
+
+def _server_policy_for_finding(finding: Finding, server_policies: dict) -> dict:
+    """Return the policy entry matching a finding's stable server identity.
+
+    Suggested policies are keyed by display name when unique and by a generated
+    suffix when duplicate names appear. The stable identity is stored inside each
+    entry as ``name`` + ``source_file`` and matched against ``Finding.server`` +
+    ``Finding.location``.
+    """
+    exact_matches = [
+        policy
+        for policy in server_policies.values()
+        if isinstance(policy, dict)
+        and policy.get("name") == finding.server
+        and policy.get("source_file") == finding.location
+    ]
+    if exact_matches:
+        return exact_matches[0]
+    direct = server_policies.get(finding.server, {})
+    return direct if isinstance(direct, dict) else {}
+
+
+def _evaluate_findings(
+    findings: List[Finding],
+    threshold: str,
+    policy_rules: dict,
+    server_policies: Optional[dict] = None,
+):
     """Apply the policy to each finding.
 
     Returns a list of ``(finding, effective_severity, blocking)`` tuples,
     preserving the input order (already severity-sorted by the rule engine).
-    Policy-disabled rules are omitted entirely; the remaining finding is
-    blocking when its effective severity ranks at or above the threshold.
+    Policy-disabled rules are omitted entirely. A server decision from a
+    suggested policy can explicitly allow, require review, or deny a server;
+    otherwise normal threshold semantics apply.
     """
     limit = SEVERITY_RANK.get(threshold, 99)
     evaluated = []
+    server_policies = server_policies or {}
     for finding in findings:
         if not _is_enabled(finding, policy_rules):
             continue
+        server_policy = _server_policy_for_finding(finding, server_policies)
+        decision = str(server_policy.get("decision", "")).lower()
+        if decision == "allow":
+            continue
         effective = _effective_severity(finding, policy_rules)
-        blocking = SEVERITY_RANK.get(effective, 99) <= limit
+        if decision in {"review", "deny"}:
+            blocking = True
+        else:
+            blocking = SEVERITY_RANK.get(effective, 99) <= limit
         evaluated.append((finding, effective, blocking))
     return evaluated
 
@@ -589,7 +791,7 @@ def _check_finding_entry(finding: Finding, effective: str) -> dict:
     """
     entry = dataclasses.asdict(finding)
     entry["severity"] = effective
-    entry["message"] = _redact_message(entry["message"])
+    entry["message"] = _redact_policy_text(entry["message"])
     return entry
 
 
@@ -619,7 +821,7 @@ def _print_check_human(passed: bool, threshold: str, counts: dict, evaluated) ->
         print(
             "  [{0}] {1}  {2}".format(effective, finding.rule_id, finding.server)
         )
-        print("      {0}".format(_redact_message(finding.message)))
+        print("      {0}".format(_redact_policy_text(finding.message)))
         if finding.fix:
             print("      fix: {0}".format(finding.fix))
 
@@ -634,12 +836,12 @@ def cmd_check(args: argparse.Namespace) -> int:
     """
     if args.policy is not None:
         try:
-            threshold, policy_rules = _load_policy(args.policy)
+            threshold, policy_rules, server_policies = _load_policy(args.policy)
         except _PolicyError as exc:
             print("error: {0}".format(exc), file=sys.stderr)
             return 2
     else:
-        threshold, policy_rules = _POLICY_FAIL_ON, {}
+        threshold, policy_rules, server_policies = _POLICY_FAIL_ON, {}, {}
 
     if args.path:
         if not os.path.exists(args.path):
@@ -655,7 +857,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     servers = [server for _config_path, servers in results for server in servers]
     findings = run_rules(servers)
 
-    evaluated = _evaluate_findings(findings, threshold, policy_rules)
+    evaluated = _evaluate_findings(findings, threshold, policy_rules, server_policies)
     counts = _check_counts(evaluated)
     passed = counts["blocking"] == 0
 
@@ -925,13 +1127,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     policy.add_argument(
         "action",
-        choices=["init"],
+        choices=["init", "suggest"],
         help="Policy action to perform.",
     )
     policy.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="For 'suggest': config file or directory to read. Omit to auto-discover.",
+    )
+    policy.add_argument(
+        "--format",
+        choices=["json"],
+        default="json",
+        help="For 'suggest': output format (default json).",
+    )
+    policy.add_argument(
+        "--json",
+        action="store_true",
+        help="For 'suggest': emit JSON (default; kept for consistency with other commands).",
+    )
+    policy.add_argument(
         "--output",
-        default=os.path.join(".", "mcpsec.policy.json"),
-        help="Path to write the policy template (default ./mcpsec.policy.json).",
+        default=None,
+        help="Path to write the policy file (policy init defaults to ./mcpsec.policy.json; suggest prints JSON when omitted).",
     )
     policy.add_argument(
         "--force",
@@ -953,7 +1172,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--policy",
         default=None,
-        help="Path to a policy JSON file (as written by 'policy init').",
+        help="Path to a policy JSON file (written by 'policy init' or 'policy suggest').",
     )
     check.add_argument(
         "--json",
