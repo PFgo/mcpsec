@@ -25,6 +25,7 @@ from mcpsec.rules import (
     RULE_METADATA,
     SEVERITY_ORDER,
     _looks_like_secret_value,
+    rule_catalog,
     rule_descriptions,
     run_rules,
 )
@@ -1047,8 +1048,31 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rules(args: argparse.Namespace) -> int:
+    """List the built-in rule catalogue (id, default severity, description).
+
+    The catalogue is derived from :func:`mcpsec.rules.rule_catalog`, which joins
+    ``RULE_METADATA`` and ``rule_descriptions`` so this command never duplicates
+    rule ids, severities, or descriptions.
+    """
+    catalog = rule_catalog()
+    if args.json:
+        print(json.dumps({"version": __version__, "rules": catalog}, indent=2))
+        return 0
+    for rule in catalog:
+        print(
+            "{0}  {1:<6}  {2}".format(
+                rule["rule_id"], rule["severity"], rule["description"]
+            )
+        )
+    count = len(catalog)
+    print("")
+    print("Total: {0} {1}".format(count, "rule" if count == 1 else "rules"))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the argparse parser with the ``scan``/``explain``/``policy``/``check`` subcommands."""
+    """Construct the argparse parser with the ``scan``/``explain``/``review``/``policy``/``check``/``rules`` subcommands."""
     parser = argparse.ArgumentParser(
         prog="mcpsec",
         description="CLI-first security scanner for MCP configurations.",
@@ -1180,6 +1204,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit a machine-readable JSON result instead of a human report.",
     )
     check.set_defaults(func=cmd_check)
+
+    rules_cmd = subparsers.add_parser(
+        "rules",
+        help="List the built-in rule catalogue (id, severity, description).",
+    )
+    rules_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the rule catalogue as a single JSON object instead of text.",
+    )
+    rules_cmd.set_defaults(func=cmd_rules)
 
     return parser
 
