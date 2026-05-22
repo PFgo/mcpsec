@@ -211,10 +211,10 @@ class RunRulesTest(unittest.TestCase):
 class RuleDescriptionsTest(unittest.TestCase):
     """rule_descriptions exposes a short text for every rule id."""
 
-    def test_covers_all_nine_rules(self):
+    def test_covers_all_rules(self):
         descriptions = rules.rule_descriptions()
-        for n in range(1, 10):
-            rule_id = "MCPSEC00{0}".format(n)
+        self.assertGreater(len(rules.RULE_METADATA), 0)
+        for rule_id, _severity in rules.RULE_METADATA:
             self.assertIn(rule_id, descriptions)
             self.assertTrue(descriptions[rule_id])
 

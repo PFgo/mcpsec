@@ -13,6 +13,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 
 from mcpsec import cli
+from mcpsec.rules import RULE_METADATA
 
 
 def _run(argv):
@@ -38,7 +39,8 @@ class PolicyInitTest(unittest.TestCase):
                 policy = json.load(handle)
             self.assertIn("fail_on", policy)
             self.assertIn("version", policy)
-            self.assertEqual(len(policy["rules"]), 9)
+            self.assertGreater(len(RULE_METADATA), 0)
+            self.assertEqual(len(policy["rules"]), len(RULE_METADATA))
             # Every rule entry carries an enabled flag and a severity.
             for rule_id, body in policy["rules"].items():
                 self.assertTrue(rule_id.startswith("MCPSEC00"))
