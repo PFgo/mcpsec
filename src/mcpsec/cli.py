@@ -324,6 +324,46 @@ def _build_sarif(findings: List[Finding]) -> dict:
     }
 
 
+def _build_rules_sarif() -> dict:
+    """Build a SARIF 2.1.0 document that lists the rule catalogue.
+
+    Unlike :func:`_build_sarif`, which serialises findings from a scan, this
+    advertises every catalogued rule under ``tool.driver.rules`` and emits an
+    empty ``results`` list because ``rules`` inspects nothing. Each rule's
+    default severity is surfaced as ``defaultConfiguration.level`` (the same
+    HIGH/MEDIUM/LOW/INFO -> error/warning/note mapping ``scan`` uses) since
+    exposing default severity is the whole point of the catalogue. Rule ids,
+    severities, and descriptions come from :func:`rule_catalog` (already sorted
+    by id) so they are never duplicated here.
+    """
+    rules = [
+        {
+            "id": rule["rule_id"],
+            "shortDescription": {"text": rule["description"]},
+            "defaultConfiguration": {
+                "level": _SARIF_LEVEL.get(rule["severity"], "note")
+            },
+        }
+        for rule in rule_catalog()
+    ]
+    return {
+        "version": "2.1.0",
+        "$schema": _SARIF_SCHEMA,
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "mcpsec",
+                        "version": __version__,
+                        "rules": rules,
+                    }
+                },
+                "results": [],
+            }
+        ],
+    }
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """Discover (or read) MCP configs, inventory servers, and report findings."""
     if args.json and args.sarif:
@@ -1053,11 +1093,19 @@ def cmd_rules(args: argparse.Namespace) -> int:
 
     The catalogue is derived from :func:`mcpsec.rules.rule_catalog`, which joins
     ``RULE_METADATA`` and ``rule_descriptions`` so this command never duplicates
-    rule ids, severities, or descriptions.
+    rule ids, severities, or descriptions. Output is human text (default),
+    ``--json``, or ``--sarif`` (SARIF 2.1.0 listing the catalogue).
     """
+    if args.json and args.sarif:
+        print("error: --json and --sarif are mutually exclusive", file=sys.stderr)
+        return 2
+
     catalog = rule_catalog()
     if args.json:
         print(json.dumps({"version": __version__, "rules": catalog}, indent=2))
+        return 0
+    if args.sarif:
+        print(json.dumps(_build_rules_sarif(), indent=2))
         return 0
     for rule in catalog:
         print(
@@ -1213,6 +1261,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Emit the rule catalogue as a single JSON object instead of text.",
+    )
+    rules_cmd.add_argument(
+        "--sarif",
+        action="store_true",
+        help="Emit the rule catalogue as a SARIF 2.1.0 report (mutually exclusive with --json).",
     )
     rules_cmd.set_defaults(func=cmd_rules)
 
