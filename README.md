@@ -101,6 +101,46 @@ filesystem-root  (examples/insecure.mcp.json)
       fix: Review the package before enabling auto-install.
 ```
 
+### `mcpsec review [path] [--format markdown|json]`
+
+Render a permission-oriented security review for a config file, directory, or the
+auto-discovered MCP config locations. Unlike `check`, this command is designed for
+humans deciding whether to approve a server: it groups findings by server,
+summarizes risky permissions, and returns a top-level decision.
+
+```sh
+mcpsec review examples/insecure.mcp.json --format markdown
+```
+
+```text
+# MCP Permission Review
+
+Decision: DENY
+Servers reviewed: 4
+Findings: 6 total — HIGH 3, MEDIUM 2, LOW 1, INFO 0
+
+## High-risk servers
+
+### filesystem-root
+- Risk: HIGH
+- Recommended action: DENY
+- Permissions:
+  - Filesystem-wide access
+  - Unpinned package execution
+  - Auto-install package execution
+```
+
+Machine-readable output is available with either `--format json` or `--json`:
+
+```sh
+mcpsec review examples/insecure.mcp.json --format json
+```
+
+The JSON object includes `decision`, `summary`, and per-server entries with
+`risk`, `recommendation`, `permissions`, `env_keys`, `header_keys`, and redacted
+`findings`. Decisions are intentionally conservative: any `HIGH` finding yields
+`DENY`; `MEDIUM` without `HIGH` yields `REVIEW`; clean configs yield `APPROVE`.
+
 ### `mcpsec policy init`
 
 Write a policy template (`./mcpsec.policy.json` by default) listing every rule
