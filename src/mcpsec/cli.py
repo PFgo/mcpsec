@@ -3,7 +3,9 @@
 ``scan`` discovers (or reads) MCP configs, inventories their servers, and runs
 the risk-rule engine, reporting findings as a human-readable report (default),
 ``--json``, or ``--sarif`` (SARIF 2.1.0). ``explain`` focuses the same machinery
-on a single named server, and ``policy init`` writes a policy template.
+on a single named server, ``policy init`` writes a policy template, and ``check``
+re-runs the rules as a CI gate that exits non-zero when a finding is at or above
+a (policy-configurable) severity threshold.
 """
 
 import argparse
@@ -18,6 +20,7 @@ from mcpsec.models import Finding, ServerDef
 from mcpsec.parser import load_config, normalize
 from mcpsec.rules import (
     RULE_METADATA,
+    SEVERITY_ORDER,
     _looks_like_secret_value,
     rule_descriptions,
     run_rules,
@@ -420,8 +423,239 @@ def cmd_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+# Threshold ranking for ``check``. Reuses the engine's SEVERITY_ORDER (single
+# source of truth) and extends it with CRITICAL above HIGH so a policy override
+# or ``fail_on: CRITICAL`` works even though the engine emits only HIGH..INFO.
+# Lower value == more severe.
+SEVERITY_RANK = dict(SEVERITY_ORDER, CRITICAL=-1)
+
+# Per-severity tally order for ``check`` output, most->least severe.
+_CHECK_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+
+
+class _PolicyError(Exception):
+    """Raised when a ``--policy`` file is missing, unparseable, or invalid."""
+
+
+def _load_policy(path: str) -> Tuple[str, dict]:
+    """Load a policy file, returning ``(fail_on, rules)``.
+
+    ``fail_on`` is normalised to upper case and validated against the known
+    severities; ``rules`` is the (possibly empty) ruleId -> config mapping.
+    Raises :class:`_PolicyError` on a missing file, malformed JSON, a non-object
+    document, or an unknown ``fail_on`` severity.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        raise _PolicyError("no such policy file: {0}".format(path))
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        raise _PolicyError("could not read policy {0}: {1}".format(path, exc))
+    if not isinstance(data, dict):
+        raise _PolicyError("policy must be a JSON object")
+    fail_on = str(data.get("fail_on", _POLICY_FAIL_ON)).upper()
+    if fail_on not in SEVERITY_RANK:
+        raise _PolicyError(
+            "unknown fail_on severity: {0}".format(data.get("fail_on"))
+        )
+    rules = data.get("rules", {})
+    if not isinstance(rules, dict):
+        raise _PolicyError("policy 'rules' must be an object")
+    for rule_id, rule_cfg in rules.items():
+        if not isinstance(rule_cfg, dict):
+            raise _PolicyError("policy rule {0} must be an object".format(rule_id))
+        if "enabled" in rule_cfg and not isinstance(rule_cfg["enabled"], bool):
+            raise _PolicyError(
+                "policy rule {0} enabled must be boolean".format(rule_id)
+            )
+        if "severity" in rule_cfg:
+            severity = str(rule_cfg["severity"]).upper()
+            if severity not in SEVERITY_RANK:
+                raise _PolicyError(
+                    "policy rule {0} has unknown severity: {1}".format(
+                        rule_id, rule_cfg["severity"]
+                    )
+                )
+    return fail_on, rules
+
+
+def _effective_severity(finding: Finding, policy_rules: dict) -> str:
+    """Resolve a finding's severity after applying any policy override.
+
+    A known severity override for the finding's rule id wins; otherwise the
+    rule engine's emitted severity is used. Policy loading validates override
+    severities before this helper is called.
+    """
+    rule_cfg = policy_rules.get(finding.rule_id)
+    if isinstance(rule_cfg, dict) and rule_cfg.get("severity"):
+        override = str(rule_cfg["severity"]).upper()
+        if override in SEVERITY_RANK:
+            return override
+    return finding.severity
+
+
+def _is_enabled(finding: Finding, policy_rules: dict) -> bool:
+    """True unless the policy explicitly disables the finding's rule."""
+    rule_cfg = policy_rules.get(finding.rule_id)
+    if isinstance(rule_cfg, dict):
+        return bool(rule_cfg.get("enabled", True))
+    return True
+
+
+def _redact_message(text: str) -> str:
+    """Mask secret-looking tokens embedded in a rule message.
+
+    Rule messages can include user-controlled command arguments (for example an
+    unpinned ``npx`` package argument). ``check`` is meant for CI logs, so apply
+    the same conservative secret-value detector used for args before printing or
+    serialising finding messages.
+    """
+    parts = []
+    for token in text.split():
+        prefix = token[: len(token) - len(token.lstrip("'\"`([{"))]
+        suffix = token[len(token.rstrip("'\"`.,;:)]}")) :]
+        core = token[len(prefix) : len(token) - len(suffix) if suffix else len(token)]
+        if core and _looks_like_secret_value(core):
+            parts.append("{0}{1}{2}".format(prefix, _REDACTED, suffix))
+        else:
+            parts.append(token)
+    return " ".join(parts)
+
+
+def _evaluate_findings(findings: List[Finding], threshold: str, policy_rules: dict):
+    """Apply the policy to each finding.
+
+    Returns a list of ``(finding, effective_severity, blocking)`` tuples,
+    preserving the input order (already severity-sorted by the rule engine).
+    Policy-disabled rules are omitted entirely; the remaining finding is
+    blocking when its effective severity ranks at or above the threshold.
+    """
+    limit = SEVERITY_RANK.get(threshold, 99)
+    evaluated = []
+    for finding in findings:
+        if not _is_enabled(finding, policy_rules):
+            continue
+        effective = _effective_severity(finding, policy_rules)
+        blocking = SEVERITY_RANK.get(effective, 99) <= limit
+        evaluated.append((finding, effective, blocking))
+    return evaluated
+
+
+def _check_counts(evaluated) -> dict:
+    """Build the counts block: total, blocking, and a per-(effective-)severity tally."""
+    counts = {"total": len(evaluated), "blocking": 0}
+    counts.update({severity: 0 for severity in _CHECK_SEVERITIES})
+    for _finding, effective, blocking in evaluated:
+        if blocking:
+            counts["blocking"] += 1
+        counts[effective] = counts.get(effective, 0) + 1
+    return counts
+
+
+def _check_finding_entry(finding: Finding, effective: str) -> dict:
+    """Serialise a finding for ``--json``, reflecting its effective severity.
+
+    Reuses :func:`dataclasses.asdict` (so the entry mirrors what ``scan`` already
+    exposes: rule_id/severity/server/message/fix/location, none of which carry
+    secret material) and overwrites ``severity`` with the policy-effective value.
+    """
+    entry = dataclasses.asdict(finding)
+    entry["severity"] = effective
+    entry["message"] = _redact_message(entry["message"])
+    return entry
+
+
+def _print_check_human(passed: bool, threshold: str, counts: dict, evaluated) -> None:
+    """Render the short, CI-friendly human report to stdout."""
+    print("PASS" if passed else "FAIL")
+    print("threshold: {0}".format(threshold))
+    print(
+        "findings: {0} total, {1} blocking".format(
+            counts["total"], counts["blocking"]
+        )
+    )
+    tally = "  ".join(
+        "{0} {1}".format(severity, counts[severity])
+        for severity in _CHECK_SEVERITIES
+        # CRITICAL is shown only when present; the engine never emits it.
+        if severity != "CRITICAL" or counts.get("CRITICAL", 0)
+    )
+    print("severity: {0}".format(tally))
+
+    blocking = [(f, eff) for f, eff, is_block in evaluated if is_block]
+    if not blocking:
+        print("No blocking findings.")
+        return
+    print("Blocking findings:")
+    for finding, effective in blocking:
+        print(
+            "  [{0}] {1}  {2}".format(effective, finding.rule_id, finding.server)
+        )
+        print("      {0}".format(_redact_message(finding.message)))
+        if finding.fix:
+            print("      fix: {0}".format(finding.fix))
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Re-run the rules as a CI gate, exiting non-zero on a blocking finding.
+
+    Scans the same inputs as ``scan`` (an explicit ``path``, else discovery),
+    applies an optional ``--policy`` (severity threshold, per-rule enable flags
+    and severity overrides), and reports PASS/FAIL. Exit codes: 0 = clean,
+    1 = at least one blocking finding, 2 = invalid usage / policy error.
+    """
+    if args.policy is not None:
+        try:
+            threshold, policy_rules = _load_policy(args.policy)
+        except _PolicyError as exc:
+            print("error: {0}".format(exc), file=sys.stderr)
+            return 2
+    else:
+        threshold, policy_rules = _POLICY_FAIL_ON, {}
+
+    if args.path:
+        if not os.path.exists(args.path):
+            print("error: no such path: {0}".format(args.path), file=sys.stderr)
+            return 2
+        files = _collect_target_files(args.path)
+    else:
+        from mcpsec.discovery import discover_existing
+
+        files = discover_existing()
+
+    results, _skipped = _gather(files)
+    servers = [server for _config_path, servers in results for server in servers]
+    findings = run_rules(servers)
+
+    evaluated = _evaluate_findings(findings, threshold, policy_rules)
+    counts = _check_counts(evaluated)
+    passed = counts["blocking"] == 0
+
+    if args.json:
+        report = {
+            "pass": passed,
+            "threshold": threshold,
+            "counts": counts,
+            "blocking_findings": [
+                _check_finding_entry(finding, effective)
+                for finding, effective, blocking in evaluated
+                if blocking
+            ],
+            "findings": [
+                _check_finding_entry(finding, effective)
+                for finding, effective, _blocking in evaluated
+            ],
+        }
+        print(json.dumps(report))
+    else:
+        _print_check_human(passed, threshold, counts, evaluated)
+
+    return 0 if passed else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the argparse parser with the ``scan``/``explain``/``policy`` subcommands."""
+    """Construct the argparse parser with the ``scan``/``explain``/``policy``/``check`` subcommands."""
     parser = argparse.ArgumentParser(
         prog="mcpsec",
         description="CLI-first security scanner for MCP configurations.",
@@ -490,6 +724,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite the output file if it already exists.",
     )
     policy.set_defaults(func=cmd_policy)
+
+    check = subparsers.add_parser(
+        "check",
+        help="CI gate: fail when a finding is at/above a severity threshold.",
+    )
+    check.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Config file or directory to check. Omit to auto-discover.",
+    )
+    check.add_argument(
+        "--policy",
+        default=None,
+        help="Path to a policy JSON file (as written by 'policy init').",
+    )
+    check.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON result instead of a human report.",
+    )
+    check.set_defaults(func=cmd_check)
 
     return parser
 
