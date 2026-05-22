@@ -20,3 +20,9 @@ jobs:
         run: PYTHONPATH=src python -m mcpsec check examples/insecure.mcp.json || true
       - name: CLI smoke test (clean config — must exit 0)
         run: PYTHONPATH=src python -m mcpsec check examples/clean.mcp.json
+      - name: CLI smoke test (review markdown)
+        run: PYTHONPATH=src python -m mcpsec review examples/insecure.mcp.json --format markdown
+      - name: CLI smoke test (review JSON)
+        run: PYTHONPATH=src python -m mcpsec review examples/insecure.mcp.json --format json | python -m json.tool >/dev/null
+      - name: CLI smoke test (review JSON alias)
+        run: PYTHONPATH=src python -m mcpsec review examples/insecure.mcp.json --json | python -m json.tool >/dev/null

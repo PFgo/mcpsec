@@ -3,9 +3,10 @@
 ``scan`` discovers (or reads) MCP configs, inventories their servers, and runs
 the risk-rule engine, reporting findings as a human-readable report (default),
 ``--json``, or ``--sarif`` (SARIF 2.1.0). ``explain`` focuses the same machinery
-on a single named server, ``policy init`` writes a policy template, and ``check``
-re-runs the rules as a CI gate that exits non-zero when a finding is at or above
-a (policy-configurable) severity threshold.
+on a single named server, ``review`` renders a permission-oriented security
+review for humans or automation, ``policy init`` writes a policy template, and
+``check`` re-runs the rules as a CI gate that exits non-zero when a finding is at
+or above a (policy-configurable) severity threshold.
 """
 
 import argparse
@@ -13,6 +14,7 @@ import dataclasses
 import json
 import os
 import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import List, Optional, Tuple
 
 from mcpsec import __version__
@@ -129,6 +131,31 @@ def _redact_args(args: List[str]) -> List[str]:
     return redacted
 
 
+def _redact_url(url: str) -> str:
+    """Redact credentials and sensitive query parameters from URLs."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return _redact_message(url)
+
+    hostname = parts.hostname or ""
+    netloc = hostname
+    if parts.port:
+        netloc = "{0}:{1}".format(netloc, parts.port)
+    if parts.username or parts.password:
+        netloc = "{0}@{1}".format(_REDACTED, netloc)
+
+    query_items = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if _flag_name_is_secret(key) or _looks_like_secret_value(value):
+            query_items.append((key, _REDACTED))
+        else:
+            query_items.append((key, value))
+    query = urlencode(query_items, doseq=True).replace("%3Credacted%3E", _REDACTED)
+    fragment = _REDACTED if parts.fragment else ""
+    return urlunsplit((parts.scheme, netloc, parts.path, query, fragment))
+
+
 def _describe(server: ServerDef) -> str:
     """One-line human description of a server's transport.
 
@@ -140,7 +167,7 @@ def _describe(server: ServerDef) -> str:
         parts = [server.command] + _redact_args(server.args)
         return "command: {0}".format(" ".join(parts))
     if server.url:
-        return "url: {0}".format(server.url)
+        return "url: {0}".format(_redact_url(server.url))
     return "(no command or url)"
 
 
@@ -654,6 +681,170 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0 if passed else 1
 
 
+_REVIEW_PERMISSION_LABELS = {
+    "MCPSEC001": "Inline secret exposure",
+    "MCPSEC002": "Authentication header exposure",
+    "MCPSEC003": "Unpinned package execution",
+    "MCPSEC004": "Auto-install package execution",
+    "MCPSEC005": "Filesystem-wide access",
+    "MCPSEC006": "Shell execution",
+    "MCPSEC007": "Plaintext remote endpoint",
+    "MCPSEC008": "Remote HTTPS endpoint",
+    "MCPSEC009": "Sampling / model-callback permission",
+}
+
+
+def _decision_for_severities(severities: List[str]) -> str:
+    """Return the top-level permission decision for a set of severities."""
+    if any(sev in ("CRITICAL", "HIGH") for sev in severities):
+        return "DENY"
+    if any(sev == "MEDIUM" for sev in severities):
+        return "REVIEW"
+    return "APPROVE"
+
+
+def _highest_severity(findings: List[Finding]) -> str:
+    """Return the most severe finding level, or INFO for clean servers."""
+    if not findings:
+        return "INFO"
+    return min((finding.severity for finding in findings), key=lambda sev: SEVERITY_RANK.get(sev, 99))
+
+
+def _server_review_entry(server: ServerDef, findings: List[Finding]) -> dict:
+    """Build one server's permission-review entry with redacted transport data."""
+    severities = [finding.severity for finding in findings]
+    risk = _highest_severity(findings)
+    return {
+        "name": server.name,
+        "source_file": server.source_file,
+        "transport": _describe(server),
+        "risk": risk if findings else "NONE",
+        "recommendation": _decision_for_severities(severities),
+        "permissions": sorted(
+            {_REVIEW_PERMISSION_LABELS.get(finding.rule_id, finding.rule_id) for finding in findings}
+        ),
+        "env_keys": sorted(server.env),
+        "header_keys": sorted(server.headers),
+        "findings": [_check_finding_entry(finding, finding.severity) for finding in findings],
+    }
+
+
+def _build_review(results: List[Tuple[str, List[ServerDef]]], findings: List[Finding]) -> dict:
+    """Build the permission-review payload used by markdown and JSON output."""
+    findings_by_identity = {}
+    findings_by_name = {}
+    for finding in findings:
+        if finding.location:
+            findings_by_identity.setdefault((finding.server, finding.location), []).append(finding)
+        else:
+            findings_by_name.setdefault(finding.server, []).append(finding)
+    servers = [server for _config_path, group in results for server in group]
+    server_entries = [
+        _server_review_entry(
+            server,
+            findings_by_identity.get((server.name, server.source_file), [])
+            + findings_by_name.get(server.name, []),
+        )
+        for server in servers
+    ]
+    severities = [finding.severity for finding in findings]
+    summary = {severity: 0 for severity in _SEVERITIES}
+    for finding in findings:
+        summary[finding.severity] = summary.get(finding.severity, 0) + 1
+    summary.update(
+        {
+            "configs": len(results),
+            "servers": len(servers),
+            "findings": len(findings),
+        }
+    )
+    return {
+        "version": __version__,
+        "decision": _decision_for_severities(severities),
+        "summary": summary,
+        "servers": server_entries,
+    }
+
+
+def _print_review_markdown(report: dict) -> None:
+    """Render a human-readable permission review as Markdown."""
+    summary = report["summary"]
+    print("# MCP Permission Review")
+    print("")
+    print("Decision: {0}".format(report["decision"]))
+    print("Servers reviewed: {0}".format(summary["servers"]))
+    print(
+        "Findings: {0} total — HIGH {1}, MEDIUM {2}, LOW {3}, INFO {4}".format(
+            summary["findings"],
+            summary.get("HIGH", 0),
+            summary.get("MEDIUM", 0),
+            summary.get("LOW", 0),
+            summary.get("INFO", 0),
+        )
+    )
+    print("")
+    if report["decision"] == "APPROVE":
+        print("No risky MCP permissions detected.")
+        print("")
+    buckets = [
+        ("## High-risk servers", {"HIGH", "CRITICAL"}),
+        ("## Needs review", {"MEDIUM", "LOW", "INFO"}),
+    ]
+    for title, severities in buckets:
+        entries = [server for server in report["servers"] if server["risk"] in severities and server["findings"]]
+        if not entries:
+            continue
+        print(title)
+        print("")
+        for server in entries:
+            print("### {0}".format(server["name"]))
+            print("- Source: `{0}`".format(server["source_file"]))
+            print("- Transport: `{0}`".format(server["transport"]))
+            print("- Risk: {0}".format(server["risk"]))
+            print("- Recommended action: {0}".format(server["recommendation"]))
+            if server["env_keys"]:
+                print("- Env keys: {0}".format(", ".join("`{0}`".format(k) for k in server["env_keys"])))
+            if server["header_keys"]:
+                print("- Header keys: {0}".format(", ".join("`{0}`".format(k) for k in server["header_keys"])))
+            print("- Permissions:")
+            for permission in server["permissions"]:
+                print("  - {0}".format(permission))
+            print("- Findings:")
+            for finding in server["findings"]:
+                print("  - [{0}] {1}: {2}".format(finding["severity"], finding["rule_id"], finding["message"]))
+                if finding.get("fix"):
+                    print("    - Fix: {0}".format(finding["fix"]))
+            print("")
+    if report["decision"] == "DENY":
+        print("Recommended action: DENY until HIGH findings are fixed or explicitly accepted in policy.")
+    elif report["decision"] == "REVIEW":
+        print("Recommended action: REVIEW before approval; no HIGH findings were detected.")
+    else:
+        print("Recommended action: APPROVE")
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Render a permission-oriented MCP security review."""
+    if args.path:
+        if not os.path.exists(args.path):
+            print("error: no such path: {0}".format(args.path), file=sys.stderr)
+            return 1
+        files = _collect_target_files(args.path)
+    else:
+        from mcpsec.discovery import discover_existing
+
+        files = discover_existing()
+    results, _skipped = _gather(files)
+    servers = [server for _config_path, group in results for server in group]
+    findings = run_rules(servers)
+    report = _build_review(results, findings)
+    if args.json or args.format == "json":
+        print(json.dumps(report))
+    else:
+        _print_review_markdown(report)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the argparse parser with the ``scan``/``explain``/``policy``/``check`` subcommands."""
     parser = argparse.ArgumentParser(
@@ -704,6 +895,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Config file or directory to read. Omit to auto-discover.",
     )
     explain.set_defaults(func=cmd_explain)
+
+
+    review = subparsers.add_parser(
+        "review",
+        help="Render a permission-oriented MCP security review.",
+    )
+    review.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Config file or directory to review. Omit to auto-discover.",
+    )
+    review.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Output format for the review (default markdown).",
+    )
+    review.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON review instead of Markdown (alias for --format json).",
+    )
+    review.set_defaults(func=cmd_review)
 
     policy = subparsers.add_parser(
         "policy", help="Manage policy templates."
