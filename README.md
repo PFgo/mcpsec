@@ -112,6 +112,59 @@ overwrite an existing file.
 mcpsec policy init --output mcpsec.policy.json
 ```
 
+### `mcpsec check [path] [--policy PATH] [--json]`
+
+Run the same scan as `mcpsec scan`, then **gate** on the results: `check` exits
+non-zero when a finding meets or exceeds a *fail threshold*, which makes it
+suitable for CI pipelines and pre-commit hooks. It accepts the same inputs as
+`scan` — a file, a directory, or (omitting `path`) the auto-discovered well-known
+locations.
+
+The default fail threshold is **HIGH**, so any `HIGH` finding blocks:
+
+```sh
+mcpsec check examples/insecure.mcp.json
+```
+
+```text
+FAIL
+threshold: HIGH
+findings: 6 total, 3 blocking
+severity: HIGH 3  MEDIUM 2  LOW 1  INFO 0
+Blocking findings:
+  [HIGH] MCPSEC005  filesystem-root
+      argument '/' grants filesystem-wide access
+      fix: Scope the path to a specific subdirectory.
+  ...
+```
+
+A clean config reports `PASS` with `0 total, 0 blocking` and exits `0`:
+
+```sh
+mcpsec check examples/clean.mcp.json
+```
+
+```text
+PASS
+threshold: HIGH
+findings: 0 total, 0 blocking
+severity: HIGH 0  MEDIUM 0  LOW 0  INFO 0
+No blocking findings.
+```
+
+`--policy <path>` reads a policy file written by
+[`mcpsec policy init`](#mcpsec-policy-init). The policy sets the `fail_on`
+threshold and a per-rule `enabled` flag and `severity` override: disabled rules
+never block (their findings are dropped), and a severity override changes whether
+a finding meets the threshold.
+
+`--json` emits a machine-readable result instead of the human report — a single
+object with the keys `pass`, `threshold`, `counts`, `blocking_findings`, and
+`findings`.
+
+**Exit codes:** `0` — no blocking finding (pass); `1` — at least one blocking
+finding (fail); `2` — invalid usage or a policy file that could not be parsed.
+
 ## Rules
 
 `mcpsec` ships nine static rules. Each fires per server and is assigned a default
@@ -175,3 +228,35 @@ what it does and does not do, and for known false positives/negatives.
 # Run the test suite (pure stdlib, no install required):
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
+
+## Continuous integration
+
+The test suite is pure stdlib, so CI needs nothing beyond a checkout and Python.
+A minimal GitHub Actions workflow that runs the suite on every pull request and
+on pushes to `main` (the full version lives in
+[`.github/workflows/test.yml`](.github/workflows/test.yml)):
+
+```yaml
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
+Because `mcpsec check` exits non-zero when a finding meets the fail threshold, it
+can also gate the pipeline on policy: add a step such as
+`PYTHONPATH=src python -m mcpsec check . --policy mcpsec.policy.json`, and a
+failing scan fails the job.
