@@ -152,6 +152,39 @@ overwrite an existing file.
 mcpsec policy init --output mcpsec.policy.json
 ```
 
+### `mcpsec policy suggest [path] [--output PATH]`
+
+Generate a conservative starter policy from an existing MCP config file,
+directory, or the auto-discovered well-known config locations. It reuses the
+same risk analysis and redaction behavior as `review`, then emits a JSON policy
+with per-server decisions.
+
+```sh
+mcpsec policy suggest examples/insecure.mcp.json --json
+```
+
+The default output is JSON on stdout. `--format json` and `--json` are accepted
+for consistency with other commands. Use `--output <path>` to write the suggested
+policy to a file instead:
+
+```sh
+mcpsec policy suggest examples/insecure.mcp.json --output mcpsec.policy.json
+```
+
+Suggested decisions are intentionally conservative:
+
+- clean / approved servers become `allow`
+- review-worthy servers become `review`
+- high-risk denied servers become `deny`
+- unknown future servers default to `review`
+
+The generated document includes `version`, `generated_by`, `source`, `defaults`,
+`fail_on`, `rules`, and a `servers` object keyed by server name. Secret-looking
+values are redacted or omitted; only env/header key names and redacted finding
+messages are included. The file is directly usable with `mcpsec check --policy`:
+server decisions of `review` or `deny` make that server's findings blocking,
+while `allow` suppresses findings for explicitly accepted servers.
+
 ### `mcpsec check [path] [--policy PATH] [--json]`
 
 Run the same scan as `mcpsec scan`, then **gate** on the results: `check` exits

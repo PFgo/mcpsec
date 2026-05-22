@@ -264,6 +264,30 @@ class CheckNoSecretLeakTest(unittest.TestCase):
             self.assertNotIn(secret, hout)
             self.assertNotIn(secret, herr)
 
+    def test_marker_secret_arg_absent_from_json_and_human_check_output(self):
+        secret = "URL_SECRET_VALUE_12345"
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _write(
+                tmp,
+                "marker-arg.mcp.json",
+                {"mcpServers": {"leaky": {"command": "npx", "args": [secret]}}},
+            )
+            policy = _write(tmp, "medium.json", {"version": 1, "fail_on": "MEDIUM"})
+
+            json_code, json_stdout, json_stderr = _run(
+                ["check", config, "--policy", policy, "--json"]
+            )
+            self.assertEqual(json_code, 1)
+            self.assertNotIn(secret, json_stdout)
+            self.assertNotIn(secret, json_stderr)
+            self.assertIn("<redacted>", json_stdout)
+
+            human_code, human_stdout, human_stderr = _run(["check", config, "--policy", policy])
+            self.assertEqual(human_code, 1)
+            self.assertNotIn(secret, human_stdout)
+            self.assertNotIn(secret, human_stderr)
+            self.assertIn("<redacted>", human_stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
