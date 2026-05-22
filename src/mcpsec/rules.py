@@ -322,3 +322,24 @@ def rule_descriptions() -> Dict[str, str]:
         if text:
             descriptions[rule_id.strip()] = text.strip()
     return descriptions
+
+
+def rule_catalog() -> List[Dict[str, str]]:
+    """Join rule metadata with descriptions into a catalogue, sorted by id.
+
+    Combines :data:`RULE_METADATA` (rule id, default severity) with
+    :func:`rule_descriptions` (rule id -> short description) into a list of
+    ``{"rule_id", "severity", "description"}`` dicts sorted by rule id. This is
+    the single source of truth for consumers that need the rule catalogue without
+    running the engine (e.g. the ``mcpsec rules`` command), so they need not
+    re-list rule ids, severities, or descriptions.
+    """
+    descriptions = rule_descriptions()
+    return [
+        {
+            "rule_id": rule_id,
+            "severity": severity,
+            "description": descriptions.get(rule_id, ""),
+        }
+        for rule_id, severity in sorted(RULE_METADATA)
+    ]

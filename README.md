@@ -238,6 +238,36 @@ object with the keys `pass`, `threshold`, `counts`, `blocking_findings`, and
 **Exit codes:** `0` — no blocking finding (pass); `1` — at least one blocking
 finding (fail); `2` — invalid usage or a policy file that could not be parsed.
 
+### `mcpsec rules`
+
+List the built-in rule catalogue without scanning anything. The default output
+prints one line per rule — rule ID, default severity, and short description —
+sorted by rule ID, with a trailing count.
+
+```sh
+mcpsec rules
+```
+
+```text
+MCPSEC001  HIGH    a literal secret value, or a secret-named key with a value.
+MCPSEC002  MEDIUM  a header carrying authentication credentials.
+...
+MCPSEC009  MEDIUM  the server requests sampling (model-completion callbacks).
+
+Total: 9 rules
+```
+
+`--json` emits a single JSON object with `version` (the mcpsec version string)
+and `rules` (a list of `{ "rule_id", "severity", "description" }` objects, sorted
+by `rule_id`):
+
+```sh
+mcpsec rules --json
+```
+
+The catalogue is derived from the same rule metadata and docstrings the engine
+uses, so it always stays in step with the rules below.
+
 ## Rules
 
 `mcpsec` ships nine static rules. Each fires per server and is assigned a default
