@@ -21,7 +21,7 @@ You can run `mcpsec` two ways.
 For customer-alpha pilots, install the pinned alpha tag directly from GitHub:
 
 ```sh
-python3 -m pip install "git+https://github.com/PFgo/mcpsec.git@v0.1.0-alpha"
+python3 -m pip install "git+https://github.com/PFgo/mcpsec.git@v0.1.0-alpha.2"
 mcpsec audit ~/.hermes/config.yaml
 mcpsec scan path/to/mcp.json
 mcpsec check path/to/mcp.json
