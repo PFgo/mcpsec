@@ -10,10 +10,9 @@ plaintext transports, and more — as human-readable, JSON, or SARIF output.
 > support human review. Expect false positives and false negatives; do not treat
 > it as the only security control or as a compliance/audit guarantee.
 
-`mcpsec` is **pure Python standard library**: it has no third-party runtime
-dependencies. PyYAML is used opportunistically (best-effort) for `.yaml`/`.yml`
-configs *only if it is already installed*; otherwise YAML files are skipped with
-a warning and JSON configs are unaffected.
+`mcpsec` is a small Python CLI. It depends on PyYAML so Hermes
+`~/.hermes/config.yaml` audits work immediately; JSON configs are handled by the
+Python standard library.
 
 ## Install / run
 
@@ -23,13 +22,17 @@ For customer-alpha pilots, install the pinned alpha tag directly from GitHub:
 
 ```sh
 python3 -m pip install "git+https://github.com/PFgo/mcpsec.git@v0.1.0-alpha"
+mcpsec audit ~/.hermes/config.yaml
 mcpsec scan path/to/mcp.json
 mcpsec check path/to/mcp.json
 mcpsec scan path/to/mcp.json --sarif > mcpsec.sarif
 ```
 
-Use `scan` for a human-readable inventory, `check` for CI/pre-commit gating, and
-`--sarif` when you want to upload findings to a code-scanning dashboard.
+Use `audit` for a customer-friendly permission review of Hermes/Cursor/Claude
+Desktop configs, `scan` for a human-readable inventory, `check` for
+CI/pre-commit gating, and `--sarif` when you want to upload findings to a
+code-scanning dashboard. See [Customer alpha quickstart](docs/QUICKSTART.md) for
+the one-page trial flow and real-shape Hermes/Cursor/Claude demo configs.
 
 Straight from a checkout, with no install:
 
@@ -51,6 +54,21 @@ form for brevity.
 Requires Python 3.8+.
 
 ## Commands
+
+### `mcpsec audit [path]`
+
+Customer-friendly permission review for real app configs. It is equivalent to
+`review`, but named for the way customers think about checking Hermes, Cursor,
+or Claude Desktop MCP permissions.
+
+```sh
+mcpsec audit ~/.hermes/config.yaml
+mcpsec audit ~/.cursor/mcp.json
+mcpsec audit "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+```
+
+Use `--json` for machine-readable output. Omit `path` to auto-discover known
+locations.
 
 ### `mcpsec scan [path]`
 

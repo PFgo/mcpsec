@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "repo-tools": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "demo-token-redacted"
+      }
+    },
+    "remote-docs": {
+      "url": "http://mcp.example.com/sse"
+    }
+  }
+}
