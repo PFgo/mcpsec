@@ -7,7 +7,7 @@
 ## 1. Install the pinned alpha
 
 ```sh
-python3 -m pip install "git+https://github.com/PFgo/mcpsec.git@v0.1.0-alpha"
+python3 -m pip install "git+https://github.com/PFgo/mcpsec.git@v0.1.0-alpha.2"
 ```
 
 If the `mcpsec` command is not found after install, add your Python user scripts directory to `PATH` and open a new shell:
