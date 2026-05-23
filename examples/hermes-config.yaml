@@ -1,0 +1,15 @@
+# Minimal Hermes-style config containing MCP servers for mcpsec demos.
+# Real users can audit their live file with:
+#   mcpsec audit ~/.hermes/config.yaml
+mcp:
+  servers:
+    filesystem-root:
+      command: npx
+      args:
+        - -y
+        - '@modelcontextprotocol/server-filesystem'
+        - /
+    docs-search:
+      url: https://mcp.example.com/sse
+      headers:
+        Authorization: Bearer demo-token-redacted

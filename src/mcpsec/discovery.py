@@ -42,6 +42,7 @@ def default_config_candidates(
         os.path.join(home_dir, ".cursor", "mcp.json"),
         # Hermes.
         os.path.join(home_dir, ".hermes", "mcp.json"),
+        os.path.join(home_dir, ".hermes", "config.yaml"),
         # Generic project-local configs (relative to CWD).
         os.path.join(".", "mcp.json"),
         os.path.join(".", ".mcp.json"),

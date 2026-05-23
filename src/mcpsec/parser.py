@@ -1,8 +1,7 @@
 """Load MCP config files and normalize them into :class:`ServerDef` objects.
 
-JSON is always supported via the standard library. YAML is supported only when
-PyYAML happens to be importable; otherwise YAML files are skipped with a warning
-rather than crashing the scan.
+JSON is supported via the Python standard library. YAML is supported via PyYAML,
+which is a runtime dependency for customer-facing Hermes config audits.
 """
 
 import json
@@ -60,16 +59,21 @@ def _coerce_str_dict(value: Any) -> Dict[str, str]:
 def normalize(path: str, data: Any) -> List[ServerDef]:
     """Convert raw config data into a list of :class:`ServerDef`.
 
-    Supports both ``{"mcpServers": {...}}`` and ``{"servers": {...}}`` shapes
-    (and a file containing both). Missing or malformed fields degrade to empty
-    defaults rather than raising.
+    Supports the common top-level ``{"mcpServers": {...}}`` and
+    ``{"servers": {...}}`` shapes, plus Hermes' nested
+    ``{"mcp": {"servers": {...}}}`` shape. Missing or malformed fields degrade
+    to empty defaults rather than raising.
     """
     servers: List[ServerDef] = []
     if not isinstance(data, dict):
         return servers
 
-    for section_key in ("mcpServers", "servers"):
-        section = data.get(section_key)
+    sections = [data.get("mcpServers"), data.get("servers")]
+    hermes_mcp = data.get("mcp")
+    if isinstance(hermes_mcp, dict):
+        sections.append(hermes_mcp.get("servers"))
+
+    for section in sections:
         if not isinstance(section, dict):
             continue
         for name, entry in section.items():

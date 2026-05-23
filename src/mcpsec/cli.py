@@ -2,9 +2,10 @@
 
 ``scan`` discovers (or reads) MCP configs, inventories their servers, and runs
 the risk-rule engine, reporting findings as a human-readable report (default),
-``--json``, or ``--sarif`` (SARIF 2.1.0). ``explain`` focuses the same machinery
-on a single named server, ``review`` renders a permission-oriented security
-review for humans or automation, ``policy init`` writes a policy template, and
+``--json``, or ``--sarif`` (SARIF 2.1.0). ``audit``/``review`` render a
+permission-oriented security review for humans or automation, ``explain``
+focuses the same machinery on a single named server, ``policy init`` writes a
+policy template, and
 ``check`` re-runs the rules as a CI gate that exits non-zero when a finding is at
 or above a (policy-configurable) severity threshold.
 """
@@ -1120,7 +1121,7 @@ def cmd_rules(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the argparse parser with the ``scan``/``explain``/``review``/``policy``/``check``/``rules`` subcommands."""
+    """Construct the argparse parser with the public mcpsec subcommands."""
     parser = argparse.ArgumentParser(
         prog="mcpsec",
         description="CLI-first security scanner for MCP configurations.",
@@ -1193,6 +1194,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit a machine-readable JSON review instead of Markdown (alias for --format json).",
     )
     review.set_defaults(func=cmd_review)
+
+    audit = subparsers.add_parser(
+        "audit",
+        help="Customer-friendly alias for 'review' (ideal for ~/.hermes/config.yaml).",
+    )
+    audit.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Config file or directory to audit. Omit to auto-discover.",
+    )
+    audit.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Output format for the audit (default markdown).",
+    )
+    audit.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON audit instead of Markdown (alias for --format json).",
+    )
+    audit.set_defaults(func=cmd_review)
 
     policy = subparsers.add_parser(
         "policy", help="Manage policy templates."

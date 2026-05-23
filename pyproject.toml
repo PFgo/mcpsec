@@ -19,9 +19,9 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Security",
 ]
-# Runtime requires only the Python standard library. PyYAML is optional and
-# used opportunistically if already installed.
-dependencies = []
+# PyYAML is required so customer-facing Hermes ~/.hermes/config.yaml audits work
+# immediately after installing the pinned alpha.
+dependencies = ["PyYAML>=5.1"]
 
 [project.optional-dependencies]
 yaml = ["PyYAML>=5.1"]
